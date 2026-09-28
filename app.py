@@ -13,6 +13,21 @@ from langchain_community.vectorstores import FAISS
 
 from dotenv import load_dotenv
 
+import re
+from langchain_core.messages import AIMessage
+
+SMALLTALK_RE = re.compile(
+    r"^\s*("
+    r"hi+|hello+|hey+|salam|assalam[\w\s-]*|"
+    r"good\s+(morning|afternoon|evening)|"
+    r"how\s+are\s+you|"
+    r"thanks?(\s+you)?|thank\s+u|thx|"
+    r"ok(ay)?|cool|great|"
+    r"bye|goodbye|see\s+you"
+    r")[\s!.?,]*$",
+    re.IGNORECASE,
+)
+
 
 # ============================================================
 # Environment
@@ -256,79 +271,40 @@ def rewrite_node(state: State) -> dict:
 # ============================================================
 
 def classifier_node(state: State) -> dict:
-
     """
-    Looks at the latest user message and classifies it into:
-
-    academic
-    fee
-    general
+    Step 1: deterministic smalltalk check (no LLM).
+    Step 2: binary LLM decision, academic vs fee.
+    There is deliberately no LLM-decided 'general' route.
     """
+    query = state["standalone_query"]
 
-    last_message = state["standalone_query"]      # was state["messages"][-1].content
+    if SMALLTALK_RE.match(query):
+        return {"query_type": "general"}
 
     prompt = (
-        "Classify the following student query into exactly "
-        "one category: academic, fee, or general.\n\n"
-
-        "Use 'academic' for questions about:\n"
-        "- attendance\n"
-        "- exams\n"
-        "- grading\n"
-        "- credits\n"
-        "- promotion\n"
-        "- course structure\n"
-        "- summer training\n"
-        "- degree requirements\n"
-        "- academic rules\n\n"
-
-        "Use 'fee' for questions about:\n"
-        "- tuition\n"
-        "- payment\n"
-        "- refund\n"
-        "- late charges\n"
-        "- scholarships\n"
-        "- fees\n"
-        "- any money-related college topic\n\n"
-
-        "Use 'general' for:\n"
-        "- greetings\n"
-        "- casual conversation\n"
-        "- general questions\n"
-        "- anything unrelated to academic rules or fees\n\n"
-
-        f"Student query:\n{last_message}\n\n"
-
-        "Return ONLY ONE WORD:\n"
-        "academic\n"
-        "fee\n"
-        "general"
+        "Classify the student's query about their college into exactly one "
+        "category: academic or fee.\n\n"
+        "fee: tuition, payment, refund, late charges, scholarships, "
+        "installments, or any money-related topic.\n"
+        "academic: everything else (attendance, exams, grading, credits, "
+        "promotion, courses, calendar, rules, facilities, staff, hostel, "
+        "procedures).\n\n"
+        "Examples:\n"
+        "'what is the minimum attendance?' -> academic\n"
+        "'who is the principal?' -> academic\n"
+        "'is there a hostel?' -> academic\n"
+        "'what is the late payment charge?' -> fee\n"
+        "'can I pay in installments?' -> fee\n\n"
+        f"Query: {query}\n\n"
+        "Return ONLY ONE WORD: academic or fee."
     )
 
-    response = classifier_llm.invoke(prompt)
+    text = str(classifier_llm.invoke(prompt).content).strip().lower()
 
-    category = str(response.content).strip().lower()
+    # Default is academic; anything unparseable still goes through RAG.
+    category = "fee" if ("fee" in text and "academic" not in text) else "academic"
 
-    # --------------------------------------------------------
-    # Normalize classifier output
-    # --------------------------------------------------------
-
-    if "academic" in category:
-
-        category = "academic"
-
-    elif "fee" in category:
-
-        category = "fee"
-
-    else:
-
-        category = "general"
-
-    return {
-        "query_type": category
-    }
-
+    return {"query_type": category}
 
 # ============================================================
 # Step 4 - Academic RAG Node
@@ -423,24 +399,18 @@ def response_node(state: State) -> dict:
     # --------------------------------------------------------
 
     if context == "NO_RETRIEVAL_NEEDED":
-
-        prompt = (
-            "You are a friendly college assistant.\n\n"
-
-            f"The student is enrolled in the "
-            f"{programme} programme.\n\n"
-
-            "Answer the student's question naturally "
-            "and conversationally using your general knowledge.\n\n"
-
-            "Do not mention the classification system.\n"
-            "Do not mention RAG.\n"
-            "Do not mention internal tools.\n\n"
-
-            f"Student question:\n{query}\n\n"
-
-            "Give a helpful and concise answer."
-        )
+        # Fixed template: no LLM call, so nothing can be hallucinated.
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        f"Happy to help! I can answer questions about "
+                        f"academics (attendance, exams, promotion, credits) "
+                        f"and fees for {programme}. What would you like to know?"
+                    )
+                )
+            ]
+        }
 
     # --------------------------------------------------------
     # RAG Question
