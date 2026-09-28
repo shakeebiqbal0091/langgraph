@@ -35,7 +35,7 @@ def build_retriver(pdf_path : str):
 academic_retriver = build_retriver("academics_handbook.pdf")
 fee_retriver = build_retriver("fee_structure.pdf")
 
-llm = ChatGroq(model="meta-llama/llama-prompt-guard-2-22m", temperature=0.4)
+llm = ChatGroq(model="openai/gpt-oss-120b", temperature=0.4)
 
 
 #step2 - Building the State 
