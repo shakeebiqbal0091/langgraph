@@ -5,6 +5,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 
+
 PDF = "fee_structure.pdf"
 
 print("=== 1. What your app indexes today (PyPDFLoader) ===")
