@@ -1,4 +1,6 @@
 import streamlit as st
+import pdfplumber
+from langchain_core.documents import Document
 
 from typing import TypedDict, Annotated
 
@@ -15,6 +17,7 @@ from dotenv import load_dotenv
 
 import re
 from langchain_core.messages import AIMessage
+import operator   # add to imports
 
 SMALLTALK_RE = re.compile(
     r"^\s*("
@@ -101,6 +104,10 @@ st.markdown(
         background-color: #1f4a2e;
         color: #86efac;
     }
+    .badge-both {
+    background-color: #3b2a5f;
+    color: #d8b4fe;
+}
 
     </style>
     """,
@@ -129,6 +136,84 @@ st.markdown(
 # ============================================================
 # Step 1 - Load RAG Resources
 # ============================================================
+
+PROGRAMMES = ["BCA", "BBA", "B.Com (H)"]
+
+
+def load_fee_documents(pdf_path: str) -> list[Document]:
+    """
+    Fee PDF -> documents.
+      - each table row  -> one document: "Header: value | Header: value"
+      - everything else -> normal 800-char text chunks
+    """
+    docs: list[Document] = []
+    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page_no, page in enumerate(pdf.pages, start=1):
+            tables = page.find_tables()
+            bboxes = [t.bbox for t in tables]
+
+            # 1) Table rows
+            for table in tables:
+                rows = table.extract()
+                if not rows or len(rows) < 2:
+                    continue
+
+                header = [
+                    (h or "").replace("\n", " ").strip() or f"col{i}"
+                    for i, h in enumerate(rows[0])
+                ]
+                last_first_cell = ""
+
+                for row in rows[1:]:
+                    cells = [(c or "").replace("\n", " ").strip() for c in row]
+                    if not any(cells):
+                        continue
+
+                    # Merged cells: forward-fill the first column
+                    if cells[0]:
+                        last_first_cell = cells[0]
+                    else:
+                        cells[0] = last_first_cell
+
+                    text = " | ".join(
+                        f"{h}: {c}" for h, c in zip(header, cells) if c
+                    )
+                    docs.append(
+                        Document(
+                            page_content=text,
+                            metadata={
+                                "source": pdf_path,
+                                "page": page_no,
+                                "kind": "table_row",
+                            },
+                        )
+                    )
+
+            # 2) Prose outside the tables
+            def outside_tables(obj, bboxes=bboxes):
+                return not any(
+                    obj["x0"] >= b[0] and obj["x1"] <= b[2]
+                    and obj["top"] >= b[1] and obj["bottom"] <= b[3]
+                    for b in bboxes
+                )
+
+            prose = page.filter(outside_tables).extract_text() or ""
+            for chunk in splitter.split_text(prose):
+                docs.append(
+                    Document(
+                        page_content=chunk,
+                        metadata={
+                            "source": pdf_path,
+                            "page": page_no,
+                            "kind": "text",
+                        },
+                    )
+                )
+
+    return docs
+
 
 @st.cache_resource(show_spinner="Loading knowledge base...")
 def load_resources():
@@ -224,9 +309,9 @@ def load_resources():
 class State(TypedDict):
     programme: str
     messages: Annotated[list, add_messages]
-    standalone_query: str          # NEW
+    standalone_query: str
     query_type: str
-    retrieved_context: str
+    retrieved_context: Annotated[list[str], operator.add]   # was: str
 
 # ============================================================
 # Step 2b - Query Rewrite Node (resolves follow-ups)
@@ -271,38 +356,55 @@ def rewrite_node(state: State) -> dict:
 # ============================================================
 
 def classifier_node(state: State) -> dict:
-    """
-    Step 1: deterministic smalltalk check (no LLM).
-    Step 2: binary LLM decision, academic vs fee.
-    There is deliberately no LLM-decided 'general' route.
-    """
     query = state["standalone_query"]
 
-    if SMALLTALK_RE.match(query):
-        return {"query_type": "general"}
-
     prompt = (
-        "Classify the student's query about their college into exactly one "
-        "category: academic or fee.\n\n"
-        "fee: tuition, payment, refund, late charges, scholarships, "
-        "installments, or any money-related topic.\n"
-        "academic: everything else (attendance, exams, grading, credits, "
-        "promotion, courses, calendar, rules, facilities, staff, hostel, "
-        "procedures).\n\n"
+        "Classify the student's query into exactly one category: "
+        "academic, fee, both, or general.\n\n"
+        "academic: attendance, exams, grading, credits, promotion, course "
+        "structure, summer training, degree requirements, academic rules, "
+        "and ANY other question about how this college works (calendar, "
+        "policies, facilities, staff, hostel, procedures).\n\n"
+        "fee: tuition, payment, refund, late charges, scholarships, or any "
+        "money-related college topic.\n\n"
+        "both: the answer genuinely needs BOTH the academic rules AND the "
+        "fee/money rules (e.g. a fee consequence of an academic event, or "
+        "an academic consequence of a payment event). Do not use 'both' "
+        "just because a query mentions two words; use it only when a "
+        "correct answer needs facts from each document.\n\n"
+        "general: ONLY greetings, thanks, small talk, or questions clearly "
+        "unrelated to any college (e.g. 'what is Python?').\n\n"
+        "IMPORTANT: If the query could plausibly be about this college and "
+        "you are unsure, choose academic, fee, or both, NEVER general.\n\n"
         "Examples:\n"
+        "'hi there' -> general\n"
+        "'explain recursion' -> general\n"
         "'what is the minimum attendance?' -> academic\n"
-        "'who is the principal?' -> academic\n"
         "'is there a hostel?' -> academic\n"
         "'what is the late payment charge?' -> fee\n"
-        "'can I pay in installments?' -> fee\n\n"
+        "'can I get a scholarship?' -> fee\n"
+        "'do I get a refund if I fail attendance and get detained?' -> both\n"
+        "'can I sit the exam if my fee is unpaid?' -> both\n"
+        "'what fee do I pay to re-take a failed subject?' -> both\n\n"
         f"Query: {query}\n\n"
-        "Return ONLY ONE WORD: academic or fee."
+        "Return ONLY ONE WORD: academic, fee, both, or general."
     )
 
-    text = str(classifier_llm.invoke(prompt).content).strip().lower()
+    response = classifier_llm.invoke(prompt)
+    category = str(response.content).strip().lower()
 
-    # Default is academic; anything unparseable still goes through RAG.
-    category = "fee" if ("fee" in text and "academic" not in text) else "academic"
+    # Normalize. Order matters: check 'both' first.
+    # Unrecognized output falls back to academic RAG, never general.
+    if "both" in category:
+        category = "both"
+    elif "academic" in category:
+        category = "academic"
+    elif "fee" in category:
+        category = "fee"
+    elif "general" in category:
+        category = "general"
+    else:
+        category = "academic"
 
     return {"query_type": category}
 
@@ -311,64 +413,34 @@ def classifier_node(state: State) -> dict:
 # ============================================================
 
 def academic_rag_node(state: State) -> dict:
-
-    """
-    Retrieves relevant information from
-    the academic handbook.
-    """
-
-    query = state["standalone_query"]             # was state["messages"][-1].content
-
-    documents = academic_retriever.invoke(query)
-
-    context = "\n\n".join(
-        document.page_content
-        for document in documents
-    )
-
-    return {
-        "retrieved_context": context
-    }
-
+    documents = academic_retriever.invoke(state["standalone_query"])
+    context = "\n\n".join(d.page_content for d in documents)
+    return {"retrieved_context": [f"[ACADEMIC HANDBOOK]\n{context}"]}
 
 # ============================================================
 # Step 5 - Fee RAG Node
 # ============================================================
 
 def fee_rag_node(state: State) -> dict:
+    """Retrieves fee rows/rules, biased toward the student's programme."""
+    query = state["standalone_query"]
+    programme = state.get("programme", "")
 
-    """
-    Retrieves relevant information from
-    the fee structure document.
-    """
+    # Row documents contain the programme name, so prefixing it improves
+    # matching. Skip the prefix if the student named a programme themselves.
+    names_a_programme = any(p.lower() in query.lower() for p in PROGRAMMES)
+    search_query = query if names_a_programme else f"{programme} {query}".strip()
 
-    query = state["standalone_query"]             # was state["messages"][-1].content
-
-    documents = fee_retriever.invoke(query)
-
-    context = "\n\n".join(
-        document.page_content
-        for document in documents
-    )
-
-    return {
-        "retrieved_context": context
-    }
-
+    documents = fee_retriever.invoke(search_query)
+    context = "\n\n".join(d.page_content for d in documents)
+    return {"retrieved_context": [f"[FEE STRUCTURE]\n{context}"]}
 
 # ============================================================
 # Step 6 - General Node
 # ============================================================
 
 def general_node(state: State) -> dict:
-
-    """
-    General questions do not require PDF retrieval.
-    """
-
-    return {
-        "retrieved_context": "NO_RETRIEVAL_NEEDED"
-    }
+    return {"retrieved_context": []}
 
 
 # ============================================================
@@ -376,112 +448,69 @@ def general_node(state: State) -> dict:
 # ============================================================
 
 def response_node(state: State) -> dict:
+    query = state["standalone_query"]
+    programme = state.get("programme", "Unknown")
 
-    """
-    Generates the final answer using the retrieved
-    context when required.
-    """
+    # Parallel branches finish in nondeterministic order; sort for stable
+    # prompts ("[ACADEMIC..." < "[FEE..." alphabetically).
+    sections = sorted(state.get("retrieved_context") or [])
 
-    query = state["standalone_query"]             # was state["messages"][-1].content
-
-    programme = state.get(
-        "programme",
-        "Unknown"
-    )
-
-    context = state.get(
-        "retrieved_context",
-        "NO_RETRIEVAL_NEEDED"
-    )
-
-    # --------------------------------------------------------
-    # General Question
-    # --------------------------------------------------------
-
-    if context == "NO_RETRIEVAL_NEEDED":
-        # Fixed template: no LLM call, so nothing can be hallucinated.
-        return {
-            "messages": [
-                AIMessage(
-                    content=(
-                        f"Happy to help! I can answer questions about "
-                        f"academics (attendance, exams, promotion, credits) "
-                        f"and fees for {programme}. What would you like to know?"
-                    )
-                )
-            ]
-        }
-
-    # --------------------------------------------------------
-    # RAG Question
-    # --------------------------------------------------------
-
+    # General path: greetings / non-college questions
+    if not sections:
+        prompt = (
+            "You are a friendly college assistant chatting with a student "
+            f"in the {programme} programme.\n\n"
+            "This is a greeting, small talk, or a general non-college "
+            "question. Answer naturally and concisely.\n\n"
+            "STRICT RULES:\n"
+            "- Do NOT state or guess anything about this college's "
+            "policies, fees, dates, rules, staff, or facilities.\n"
+            "- If the message actually asks about the college, say you can "
+            "look that up in the official documents and ask them to "
+            "rephrase their question about academics or fees.\n"
+            "- Do not mention classification, RAG, or internal tools.\n\n"
+            f"Student message:\n{query}\n\n"
+            "Answer:"
+        )
     else:
-
+        context = "\n\n---\n\n".join(sections)
         prompt = (
             "You are a college assistant helping a student.\n\n"
-
-            f"The student is enrolled in the "
-            f"{programme} programme.\n\n"
-
-            "Use the following official college document "
-            "context to answer the question accurately.\n\n"
-
+            f"The student is enrolled in the {programme} programme.\n\n"
+            "Use the following official college document excerpts to "
+            "answer the question accurately. Each excerpt is labelled "
+            "with its source document.\n\n"
             "IMPORTANT RULES:\n"
-            "1. Use the provided context as the primary source.\n"
-            "2. Do not invent college policies or numbers.\n"
-            "3. If the answer is not present in the context, "
-            "clearly say that the information was not found "
-            "in the provided college documents.\n"
-            "4. If multiple programmes are mentioned, "
-            f"focus on {programme} when possible.\n"
-            "5. Give a clear and friendly answer.\n\n"
-
-            f"Official document context:\n"
-            f"{context}\n\n"
-
-            f"Student question:\n"
-            f"{query}\n\n"
-
+            "1. Use the provided excerpts as the only source of college "
+            "facts.\n"
+            "2. Do not invent college policies, dates, or numbers.\n"
+            "3. If any part of the question is not covered by the "
+            "excerpts, say clearly that this part was not found in the "
+            "provided college documents. Answer the covered parts "
+            "normally.\n"
+            "4. If the answer uses more than one document, state which "
+            "document each fact comes from.\n"
+            f"5. If figures differ by programme, focus on {programme}.\n"
+            "6. Give a clear and friendly answer.\n\n"
+            f"Official document excerpts:\n{context}\n\n"
+            f"Student question:\n{query}\n\n"
             "Answer:"
         )
 
-    # --------------------------------------------------------
-    # Generate Answer
-    # --------------------------------------------------------
-
     response = llm.invoke(prompt)
-
-    # Return actual AIMessage
-    return {
-        "messages": [response]
-    }
-
+    return {"messages": [response]}
 
 # ============================================================
 # Step 8 - Router
 # ============================================================
 
 def route_query(state: State):
-
-    """
-    Routes the query according to the classifier result.
-    """
-
-    query_type = state["query_type"]
-
-    if query_type == "academic":
-
-        return "academic_rag"
-
-    elif query_type == "fee":
-
-        return "fee_rag"
-
-    else:
-
-        return "general"
-
+    """Returning a list of node names runs them in parallel."""
+    return {
+        "academic": ["academic_rag"],
+        "fee": ["fee_rag"],
+        "both": ["academic_rag", "fee_rag"],
+    }.get(state["query_type"], ["general"])
 
 # ============================================================
 # Step 9 - Build LangGraph
