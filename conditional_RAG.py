@@ -138,34 +138,6 @@ def route_query(state:State):
         return "general_node"
 
 # -------------------------------------------------------------
-# #step 5 - Building the graph 
-
-# graph = StateGraph(State)
-
-
-# graph.add_node("classifier_node", classifier_node)
-# graph.add_node("academic_rag_node", academic_rag_node)
-# graph.add_node("fee_rag_node", fee_rag_node)
-# graph.add_node("general_node", general_node)
-# graph.add_node("response_node", response_node)
-
-# #edges 
-
-# graph.add_edge(START,"classifier")
-
-# graph.add_conditional_edges(
-#     "classifier",route_query
-# )
-
-# graph.add_edge("academic_rag","response")
-# graph.add_edge("fee_rag","response")
-# graph.add_edge("general","response")
-
-# graph.add_edge("response",END)
-
-# app = graph.compile()
-
-# -------------------------------------------------------------
 
 # Step 5 - Building the graph
 

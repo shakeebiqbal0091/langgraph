@@ -43,3 +43,17 @@ Answer
 ## Run
 
 streamlit run app.py
+
+## Meta WhatsApp Webhook
+
+Start the webhook server separately from Streamlit:
+
+```bash
+uvicorn webhook:app --host 0.0.0.0 --port 8000
+```
+
+Configure Meta with the public HTTPS callback URL `https://<your-domain>/webhook`.
+The verification token is stored in the gitignored `.env.webhook` file as
+`META_VERIFY_TOKEN`; alternatively, set that environment variable directly.
+Meta's GET verification challenge is validated at `/webhook`, and POST event
+payloads are acknowledged with HTTP 200.
