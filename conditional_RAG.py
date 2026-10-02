@@ -171,36 +171,37 @@ graph.add_edge("response_node", END)
 app = graph.compile()
 
 
-#step 6 - Run the code 
+#step 6 - Run the code (CLI only; skipped when imported by FastAPI)
 
-print("welcome to the College assistant \n\n")
+if __name__ == "__main__":
+    print("welcome to the College assistant \n\n")
 
-print("which programe are you in ")
-print("1. BCA")
-print("2. BBA")
-print("3. B.com (H)")
+    print("which programe are you in ")
+    print("1. BCA")
+    print("2. BBA")
+    print("3. B.com (H)")
 
-choice = input("\nEnter 1, 2 or 3 ")
+    choice = input("\nEnter 1, 2 or 3 ")
 
-programme_map = {
-    "1": "BCA",
-    "2": "BBA",
-    "3": "B.Com (H)"
-}
-student_programme = programme_map.get(choice, "BCA")
+    programme_map = {
+        "1": "BCA",
+        "2": "BBA",
+        "3": "B.Com (H)"
+    }
+    student_programme = programme_map.get(choice, "BCA")
 
-print(f"\nGreat! You're set as a {student_programme} student.")
+    print(f"\nGreat! You're set as a {student_programme} student.")
 
-while True:
-    user_query = input("You:  ")
+    while True:
+        user_query = input("You:  ")
 
-    if user_query.lower() in ["exit","quit"]:
-        break
-    
-    result = app.invoke({
-        "programme": student_programme,
-        "messages": [("human",user_query)]
-    })
+        if user_query.lower() in ["exit","quit"]:
+            break
+        
+        result = app.invoke({
+            "programme": student_programme,
+            "messages": [("human",user_query)]
+        })
 
-    print(f"Assistant : {result['messages'][-1].content}")
+        print(f"Assistant : {result['messages'][-1].content}")
 
